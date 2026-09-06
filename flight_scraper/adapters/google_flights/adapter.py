@@ -201,12 +201,20 @@ class GoogleFlightsAdapter(BaseAdapter):
         return out
 
     # ---- booking visit ----------------------------------------------------------------------
-    @staticmethod
-    def _choose_return(rows: list[Itinerary], pick: Pick) -> Itinerary:
+    FASTEST_RETURN_TOLERANCE_MIN = 10
+
+    @classmethod
+    def _choose_return(cls, rows: list[Itinerary], pick: Pick) -> Itinerary:
         if pick is Pick.CHEAPEST:
             return min(rows, key=lambda r: (r.price_results_cad or 1e9, r.duration_min or 10**6))
         if pick is Pick.FASTEST:
-            return min(rows, key=lambda r: (r.duration_min or 10**6, r.price_results_cad or 1e9))
+            # shortest return, but a flight within 10 min of the shortest is "as fast": take the cheapest
+            # of those (observed YQB-YYZ: the 1-minute-shorter return cost CA$1,758 vs CA$562)
+            shortest = min(r.duration_min or 10**6 for r in rows)
+            pool = [
+                r for r in rows if (r.duration_min or 10**6) <= shortest + cls.FASTEST_RETURN_TOLERANCE_MIN
+            ]
+            return min(pool, key=lambda r: (r.price_results_cad or 1e9, r.duration_min or 10**6))
         return rows[0]  # BEST → Google's first returning row
 
     def _click_row(self, page: Any, label: str, index: int) -> None:

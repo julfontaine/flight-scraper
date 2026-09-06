@@ -50,7 +50,7 @@
 - **Provide `SUPABASE_URL` / `SUPABASE_SERVICE_KEY`** (`sb_secret_…`) in `.env` and paste `supabase/migrations/0001_init.sql` into the SQL editor; then `cli db-check` and `pytest -m live tests/live/test_supabase_live.py`.
 - **Pick a refresh lever** (none applied; default 40 loads / all booking visits → 1a cells every ≈ 17 days): A `max_page_loads_per_run: 120`, B `booking_visits: best_only`, C trim `+90` or `1a2c`, D pax-derive (see Blockers).
 - **Confirm the seed watch-list** and that `price_total_cad` = cheapest provider (often an OTA) rather than the airline's own price (both are stored; the website can prefer `raw.booking.providers[is_airline]`).
-- **Return-leg rule** (Best → first returning row, Cheapest → min price, Fastest → min duration) and **block handling** (abort after 2 consecutive blocks, consent page = block) are implemented as planned — confirm.
+- **Return-leg rule** (Best → first returning row, Cheapest → min price, Fastest → min duration, taking the cheapest return within 10 min of the shortest after a YQB-YYZ run chose a CA$1,758 return 1 min faster than a CA$562 one) and **block handling** (abort after 2 consecutive blocks, consent page = block) are implemented as planned — confirm.
 - **Merge `implement-003` into `main`** (branch left unmerged).
 
 ## Blockers

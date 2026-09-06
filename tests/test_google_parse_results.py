@@ -181,3 +181,16 @@ def test_thin_route_fixture_yqb_cdg_dedups_picks():
     identities = {p.identity() for p in picks.values()}
     assert len(identities) < 3  # at least two picks coincide → only one booking visit was needed (5 loads)
     assert (YQB_CDG / "booking_best.txt").exists() and not (YQB_CDG / "booking_cheapest.txt").exists()
+
+
+def test_fastest_return_prefers_cheapest_within_tolerance():
+    from flight_scraper.adapters.google_flights.adapter import GoogleFlightsAdapter
+    from flight_scraper.models import Pick
+    from tests.conftest import make_it
+
+    rows = [make_it(1758, 84, idx=0), make_it(562, 85, idx=1), make_it(500, 120, idx=2)]
+    assert GoogleFlightsAdapter._choose_return(rows, Pick.FASTEST).row_index == 1  # 1 min slower, 3x cheaper
+    assert GoogleFlightsAdapter._choose_return(rows, Pick.CHEAPEST).row_index == 2
+    assert GoogleFlightsAdapter._choose_return(rows, Pick.BEST).row_index == 0
+    rows = [make_it(1758, 84, idx=0), make_it(562, 95, idx=1)]
+    assert GoogleFlightsAdapter._choose_return(rows, Pick.FASTEST).row_index == 0  # 11 min: outside tolerance
