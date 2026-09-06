@@ -24,6 +24,7 @@ app = typer.Typer(
 log = logging.getLogger("flight_scraper")
 
 WatchlistOpt = Annotated[Path | None, typer.Option("--watchlist", help="Path to watchlist.yaml")]
+_RUN_FLAGS: dict[str, bool] = {}
 ARTIFACT_RETENTION_DAYS = 14
 STALE_CELL_DAYS = 45
 MAX_RUN_AGE_HOURS = 48
@@ -198,11 +199,23 @@ def run(
     depart: Annotated[str | None, typer.Option(help="ad-hoc depart date YYYY-MM-DD (skips rotation)")] = None,
     return_date: Annotated[str | None, typer.Option("--return", help="ad-hoc return date YYYY-MM-DD")] = None,
     limit: Annotated[int | None, typer.Option(help="max searches this run")] = None,
+    capture_rpc: Annotated[
+        bool, typer.Option("--capture-rpc", help="record Google RPC bodies + DOM cross-check (artifacts/)")
+    ] = False,
+    experimental_pax_derive: Annotated[
+        bool,
+        typer.Option(
+            "--experimental-pax-derive",
+            help="lever D experiment: reload the Best booking link re-encoded for the other pax configs",
+        ),
+    ] = False,
 ) -> None:
     """Run the scraper (rotation-planned or ad-hoc). Exit codes: 0 ok/partial, 2 blocked, 3 failed."""
     settings, wl = _load(watchlist)
     if headed:
         settings.headed = True
+    global _RUN_FLAGS
+    _RUN_FLAGS = {"capture_rpc": capture_rpc, "pax_derive": experimental_pax_derive}
     max_loads = budget or settings.max_page_loads_override or wl.budget.max_page_loads_per_run
     if not dry_run and not settings.has_supabase:
         msg = "SUPABASE_URL / SUPABASE_SERVICE_KEY not set: falling back to --dry-run (out/<run_id>.json)"
@@ -262,14 +275,18 @@ def _execute(
     set_run_id(run_id)
     sink = sink or DryRunSink(settings.out_dir)
     adapters = None
-    if capture_dir is not None:
+    flags = dict(_RUN_FLAGS)
+    if capture_dir is not None or flags.get("capture_rpc") or flags.get("pax_derive"):
         from .adapters.google_flights.adapter import GoogleFlightsAdapter
 
-        class CapturingGoogle(GoogleFlightsAdapter):  # writes sanitised fixtures next to the parsers' tests
+        class ConfiguredGoogle(GoogleFlightsAdapter):  # fixtures / RPC capture / lever-D experiment
             def __init__(self, *a, **kw):
                 super().__init__(*a, capture_dir=capture_dir, **kw)
+                self.capture_rpc = bool(flags.get("capture_rpc"))
+                if flags.get("pax_derive"):
+                    self.pax_derive_configs = [(p.key, p.adults, p.children) for p in wl.passenger_configs]
 
-        adapters = dict(REGISTRY) | {"google_flights": CapturingGoogle}
+        adapters = dict(REGISTRY) | {"google_flights": ConfiguredGoogle}
     runner = Runner(
         settings,
         wl,
@@ -423,6 +440,57 @@ def health(watchlist: WatchlistOpt = None) -> None:
         typer.echo(f"PROBLEM: {p}")
     typer.echo("healthy" if not problems else "UNHEALTHY")
     raise typer.Exit(code=1 if problems else 0)
+
+
+PROBE_ENTRY = {
+    "westjet": "https://www.westjet.com/en-ca/flights",
+    "air_canada": "https://www.aircanada.com/ca/en/aco/home.html",
+    "kayak": "https://www.ca.kayak.com/flights",
+    "air_transat": "https://www.airtransat.com/en-CA/home",
+    "skyscanner": "https://www.skyscanner.ca/",
+    "porter": "https://www.flyporter.com/en-ca/",
+    "flair": "https://www.flyflair.com/",
+    "expedia": "https://www.expedia.ca/Flights",
+    "google_flights": "https://www.google.com/travel/flights?hl=en-US&curr=CAD&gl=CA",
+}
+PROBE_REQUEST_RE = r"/graphql|/shop|/api/"
+
+
+@app.command()
+def probe(source: Annotated[str, typer.Argument(help="source id, e.g. westjet")]) -> None:
+    """Open a HEADED browser on the source's entry page; YOU drive one search by hand. Records the final
+    URL, request URLs matching /graphql|/shop|/api/ and a screenshot under artifacts/probe/<source>/."""
+    import re
+
+    from .browser import open_context
+
+    if source not in PROBE_ENTRY:
+        typer.echo(f"unknown source {source!r}; one of {sorted(PROBE_ENTRY)}")
+        raise typer.Exit(code=1)
+    settings = Settings.from_env()
+    _setup_logging(settings.log_level, settings.logs_dir)
+    settings.headed = True
+    target = settings.artifacts_dir / "probe" / source
+    target.mkdir(parents=True, exist_ok=True)
+    seen: list[str] = []
+    pattern = re.compile(PROBE_REQUEST_RE)
+    typer.echo(f"opening {PROBE_ENTRY[source]} — drive one search manually, then CLOSE the browser window")
+    with open_context(settings, f"probe_{source}") as page:
+        page.unroute("**/*")  # the probe must see the site exactly as a person does (images too)
+        page.on("request", lambda req: seen.append(req.url) if pattern.search(req.url) else None)
+        page.goto(PROBE_ENTRY[source], wait_until="domcontentloaded")
+        try:
+            page.wait_for_event("close", timeout=0)
+        except Exception:  # noqa: BLE001 - window closed / context gone
+            pass
+        finally:
+            try:
+                (target / "final_url.txt").write_text(page.url, encoding="utf-8")
+                page.screenshot(path=str(target / "final.png"))
+            except Exception:  # noqa: BLE001
+                pass
+    (target / "requests.txt").write_text("\n".join(dict.fromkeys(seen)), encoding="utf-8")
+    typer.echo(f"recorded {len(set(seen))} matching request URLs into {target}")
 
 
 @app.command("prune-artifacts")

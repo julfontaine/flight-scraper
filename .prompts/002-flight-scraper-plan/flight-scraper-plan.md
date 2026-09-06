@@ -645,7 +645,8 @@ def local_v1(cands: list[Itinerary], pick: Pick) -> Itinerary:
       <execution_notes>systemd `OnCalendar` uses the machine's local time zone; set `TZ` explicitly in the unit and document it. Do not run the service as root (browser profile ownership). `Persistent=true` makes a missed 06:30 run fire when WSL wakes — combined with `RandomizedDelaySec` this is the intended jitter; do not add a second sleep in the script. The log rotation is in-process (no logrotate dependency). `health` must not hit Google — it reads Supabase or `out/`. Keep the README's website section in sync with the view columns.</execution_notes>
     </phase>
 
-    <phase number="5" name="Hardening and extension (optional)" status="pending">
+    <phase number="5" name="Hardening and extension (optional)" status="partial">
+      <!-- 2026-09-06: RPC capture/cross-check, probe command, lever-D rewrite (live-verified), docs/enabling-a-source.md, drift alarm done; patchright path not verified live, carry-on filter experiment not done. -->
       <objective>Reduce breakage risk and prepare the next source without changing v1 behaviour by default: RPC JSON cross-checks, the patchright engine path, the passenger-derived booking-load experiment, a headed probe command for WestJet/Air Canada, and a selector-drift alarm.</objective>
       <tasks>
         <task priority="medium">RPC interception: `page.on("response")` capture of `GetShoppingResults` / `GetBookingResults` (strip the `)]}'` prefix, JSON-decode) behind `--capture-rpc`; save to artifacts and log a discrepancy warning when the RPC row count or the min price differs from the DOM parse. DOM stays the source of truth; RPC parsing is not promoted in this phase.</task>

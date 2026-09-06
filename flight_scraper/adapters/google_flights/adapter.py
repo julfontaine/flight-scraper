@@ -31,7 +31,7 @@ from .parse_results import (
     row_labels,
     rows_to_itineraries,
 )
-from .tfs import build_search_url
+from .tfs import booking_flight_numbers, build_search_url, rewrite_passengers
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +43,17 @@ LOADS: list[tuple[Pick | None, str, Pick]] = [
 LOAD_FIXTURE_NAME = {"best_load": "best", "cheapest_load": "cheapest", "duration_load": "duration"}
 BOOKING_URL_RE = re.compile(r"/travel/flights/booking")
 LUGGAGE_SOURCE = "google_booking_page"
+
+
+def _flight_numbers_from_url(url: str) -> list[str]:
+    """The booking page prints no flight numbers, but its tfs carries carrier + number per segment."""
+    from urllib.parse import parse_qs, urlparse
+
+    try:
+        tfs = parse_qs(urlparse(url).query).get("tfs", [""])[0]
+    except ValueError:
+        return []
+    return booking_flight_numbers(tfs) if tfs else []
 
 
 def _strip_html(html: str) -> str:
@@ -68,6 +79,11 @@ class GoogleFlightsAdapter(BaseAdapter):
         self._current_labels: list[str] = []
         self._rpc: RpcCounter | None = None
         self._rpc_page: Any = None
+        self.capture_rpc = False  # --capture-rpc: record GetShoppingResults bodies + DOM cross-check
+        self._recorder: Any = None
+        self.rpc_reports: list[dict[str, Any]] = []
+        # lever D experiment (--experimental-pax-derive): (key, adults, children) configs to derive
+        self.pax_derive_configs: list[tuple[str, int, int]] = []
 
     # ---- pure -------------------------------------------------------------------------------
     def build_url(self, query: SearchQuery, variant: Pick | None = None) -> str:
@@ -97,7 +113,26 @@ class GoogleFlightsAdapter(BaseAdapter):
     def _rpc_for(self, page: Any) -> RpcCounter:
         if self._rpc is None or self._rpc_page is not page:
             self._rpc, self._rpc_page = RpcCounter(page), page
+            if self.capture_rpc:
+                from .rpc import RpcRecorder
+
+                self._recorder = RpcRecorder(page)
         return self._rpc
+
+    def _rpc_cross_check(self, tag: str, cands: list[Itinerary]) -> None:
+        if self._recorder is None:
+            return
+        from .rpc import RpcRecorder, cross_check
+
+        bodies = self._recorder.take("GetShoppingResults")
+        report = cross_check(bodies, [c.price_results_cad for c in cands if c.price_results_cad])
+        report["load"] = tag
+        self.rpc_reports.append(report)
+        log.info("rpc cross-check %s: %s", tag, report)
+        root = getattr(self.artifacts, "root", None)
+        run_id = getattr(self.artifacts, "run_id", None)
+        if root is not None and run_id is not None:
+            RpcRecorder.save(Path(root) / run_id / "rpc" / (self.current_search_key or "search"), tag, bodies)
 
     def _read_rows(self, page: Any, *, min_rpc: int = 2) -> list[str]:
         return read_rows(
@@ -152,6 +187,7 @@ class GoogleFlightsAdapter(BaseAdapter):
         for c in cands:
             if unparsed:
                 c.raw["unparsed"] = unparsed
+        self._rpc_cross_check(tag, cands)
         return cands
 
     def search(self, page: Any, query: SearchQuery) -> list[Itinerary]:
@@ -308,12 +344,58 @@ class GoogleFlightsAdapter(BaseAdapter):
             it.checked_bag_fee_cad = info.checked_bag_fee_cad
             it.luggage_source = LUGGAGE_SOURCE
         it.price_insight = info.price_insight
-        if info.flight_numbers:
-            it.flight_numbers = info.flight_numbers
+        flights = info.flight_numbers or _flight_numbers_from_url(url)
+        if flights:
+            it.flight_numbers = flights
         if info.fare_family:
             it.fare_family = info.fare_family
         if info.separate_tickets:
             it.raw["self_transfer"] = True
+
+    def _pax_derive(self, page: Any, query: SearchQuery, it: Itinerary) -> None:
+        """Lever D experiment: reload this pick's booking link re-encoded for the other passenger
+        configs and record the totals in ``raw.pax_derived`` (report only; 1 load per config)."""
+        from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+        if not it.deep_link_url or "/booking" not in it.deep_link_url:
+            return
+        parsed = urlparse(it.deep_link_url)
+        params = parse_qs(parsed.query)
+        tfs = params.get("tfs", [""])[0]
+        if not tfs:
+            return
+        derived: dict[str, Any] = {}
+        for key, adults, children in self.pax_derive_configs:
+            if (adults, children) == (query.pax.adults, query.pax.children):
+                continue
+            new_params = {k: v[0] for k, v in params.items()} | {
+                "tfs": rewrite_passengers(tfs, adults, children)
+            }
+            url = urlunparse(parsed._replace(query=urlencode(new_params)))
+            self._sleep("between_loads")
+            try:
+                self._goto(page, url)
+                page.wait_for_selector("text=/Book with|Booking options|No booking options/", timeout=30_000)
+                self.sleep.settle(2.0, 4.0) if self.sleep is not None else page.wait_for_timeout(2_000)
+                text = page.locator("body").inner_text(timeout=15_000)
+                info = parse_booking_text(text)
+                cheapest = info.cheapest
+                derived[key] = {
+                    "url": page.url,
+                    "adults": adults,
+                    "children": children,
+                    "passengers_note": info.passengers_note,
+                    "accepted": info.passengers_note == adults + children,
+                    "price_total_cad": cheapest.total_cad if cheapest else None,
+                    "price_provider": cheapest.name if cheapest else None,
+                    "providers": [p.model_dump() for p in info.providers],
+                }
+            except BlockedError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - experiment only
+                derived[key] = {"error": f"{type(exc).__name__}: {exc}"}
+            log.info("pax-derive %s: %s", key, {k: v for k, v in derived[key].items() if k != "providers"})
+        it.raw["pax_derived"] = derived
 
     def enrich_luggage(self, page: Any, query: SearchQuery, itinerary: Itinerary, pick: Pick) -> Itinerary:
         """Generic contract: re-navigate to the pick's load if needed (1 extra load), then visit."""
@@ -355,6 +437,8 @@ class GoogleFlightsAdapter(BaseAdapter):
                 chosen.raw.setdefault("booking_pick", pick.value)
                 if chosen.price_stage is PriceStage.BOOKING:
                     visited[key] = chosen  # only successful visits are reused by later picks
+                    if self.pax_derive_configs and pick is Pick.BEST:
+                        self._pax_derive(page, query, chosen)
                 else:
                     failed_visits += 1
             else:
