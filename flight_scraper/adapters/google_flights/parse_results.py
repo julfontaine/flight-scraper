@@ -30,6 +30,7 @@ ROW_SELECTOR = "li.pIav2d"
 LONG_LAYOVER_MIN = 4 * 60
 
 PRICE_RE = re.compile(r"From (\d[\d,]*) (Canadian dollars|[A-Za-z ]+?)(?: round trip)? total", re.I)
+UNPRICED_RE = re.compile(r"Total price is unavailable|Price unavailable", re.I)
 STOPS_RE = re.compile(r"\b(Nonstop|(\d+) stops?) flight with (.+?)\.(?:\s|$)", re.I)
 LEAVES_RE = re.compile(
     r"Leaves (.+?) at (\d{1,2}:\d{2}\s?[AP]M) on (\w+), (\w+) (\d{1,2})"
@@ -157,11 +158,15 @@ def rows_to_itineraries(
     """aria-labels → tagged candidates (+ the labels that did not parse, kept for ``raw.unparsed``)."""
     out: list[Itinerary] = []
     unparsed: list[str] = []
+    unpriced = 0
     seen: set[str] = set()
     for idx, label in enumerate(labels):
         if label in seen:  # identical sentence twice = a re-render artefact, not a second itinerary
             continue
         seen.add(label)
+        if UNPRICED_RE.search(label):  # Google shows the itinerary but has no fare: not a candidate
+            unpriced += 1
+            continue
         parsed = parse_row_aria(label, query.depart_date)
         if parsed is None or parsed.raw.get("currency_mismatch"):
             unparsed.append(label)
@@ -181,6 +186,9 @@ def rows_to_itineraries(
                 raw={**parsed.raw, "candidate_source": candidate_source, "row_index": idx},
             )
         )
+    if unpriced:
+        for it in out:
+            it.raw["rows_unpriced"] = unpriced
     return out, unparsed
 
 

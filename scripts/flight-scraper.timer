@@ -1,0 +1,14 @@
+[Unit]
+Description=Run flight-scraper once a day at 06:30 (+ up to 45 min random delay)
+
+[Timer]
+# Local time of the machine (TZ is set explicitly in the service; WSL2 follows the Windows clock).
+OnCalendar=*-*-* 06:30:00
+RandomizedDelaySec=45m
+# A missed 06:30 (WSL asleep) fires as soon as the timer is active again — combined with the
+# randomized delay this is the intended jitter; do not add another sleep in run_daily.sh.
+Persistent=true
+Unit=flight-scraper.service
+
+[Install]
+WantedBy=timers.target

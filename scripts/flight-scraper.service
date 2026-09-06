@@ -1,0 +1,17 @@
+[Unit]
+Description=flight-scraper daily Google Flights run (YQB/YUL round trips -> Supabase)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jfontaine
+WorkingDirectory=/home/jfontaine/Projects/flight-scraper
+EnvironmentFile=-/home/jfontaine/Projects/flight-scraper/.env
+Environment=TZ=America/Toronto
+Environment=PYTHONUNBUFFERED=1
+TimeoutStartSec=45min
+ExecStart=/home/jfontaine/Projects/flight-scraper/scripts/run_daily.sh
+# 0 ok/partial, 2 blocked, 3 failed — all are "the run happened"; let journald keep the outcome.
+SuccessExitStatus=0 2 3
+Nice=10

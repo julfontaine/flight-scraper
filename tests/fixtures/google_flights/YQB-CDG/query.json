@@ -1,0 +1,17 @@
+{
+  "source_id": "google_flights",
+  "origin": "YQB",
+  "destination": "CDG",
+  "depart_date": "2026-11-07",
+  "return_date": "2026-11-14",
+  "offset_days": 60,
+  "pax": {
+    "key": "1a",
+    "adults": 1,
+    "children": 0,
+    "child_ages": [],
+    "priority": 3
+  },
+  "cabin": "economy",
+  "currency": "CAD"
+}

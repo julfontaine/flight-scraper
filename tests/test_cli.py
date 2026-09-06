@@ -118,3 +118,38 @@ def test_run_without_credentials_falls_back_to_dry_run(isolated: Path):
 def test_run_no_matching_cells(isolated: Path):
     result = runner.invoke(cli.app, ["run", "--dry-run", "--route", "YUL-XXX"])
     assert result.exit_code == 0 and "nothing to do" in result.output
+
+
+def test_run_with_credentials_uses_supabase_sink_and_state(isolated: Path, no_browser, monkeypatch):
+    """Credentials + not --dry-run → SupabaseSink (JSON companion kept) + rotation state from the view."""
+    from tests.test_db_sink import FakeSupabase
+
+    fake = FakeSupabase()
+    monkeypatch.setattr(
+        cli.Settings,
+        "from_env",
+        classmethod(
+            lambda c, env_file=None: Settings(
+                supabase_url="https://abcdefgh.supabase.co",
+                supabase_service_key="sb_secret_x",
+                out_dir=isolated / "out",
+                artifacts_dir=isolated / "artifacts",
+            )
+        ),
+    )
+    monkeypatch.setattr(cli, "_supabase_client", lambda settings: fake)
+    result = runner.invoke(
+        cli.app, ["run", "--source", "google_flights", "--route", "YUL-CDG", "--pax", "1a", "--offset", "60"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "upserted into Supabase project abcdefgh" in result.output and "sb_secret" not in result.output
+    tables = [c[0] for c in fake.calls]
+    assert "cell_last_scraped" in tables and "search_runs" in tables and "searches" in tables
+    assert "itineraries" in tables and len(fake.itineraries) == 3
+    files = [f for f in (isolated / "out").glob("*.json") if f.name != "rotation_state.json"]
+    assert len(files) == 1  # companion JSON still written
+
+
+def test_db_check_without_credentials_exits_1(isolated: Path):
+    result = runner.invoke(cli.app, ["db-check"])
+    assert result.exit_code == 1 and "not set" in result.output

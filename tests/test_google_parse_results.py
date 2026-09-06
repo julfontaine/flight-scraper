@@ -137,3 +137,47 @@ def test_query_fixture_matches_watchlist_shape():
     q = load_query()
     assert q.origin == "YUL" and q.destination == "CDG" and q.pax == PaxConfig(key="1a", adults=1, priority=3)
     assert q.return_date == q.depart_date.replace(day=q.depart_date.day + 7)
+
+
+YQB_CDG = FIXTURES / "google_flights" / "YQB-CDG"
+
+
+def test_unpriced_rows_are_not_candidates_and_not_unparsed():
+    q = load_query()
+    unpriced = (
+        "Total price is unavailable. 1 stop flight with Air Canada. Operated by Air Canada Rouge. "
+        "Leaves Québec City Jean Lesage International Airport at 5:00 AM on Saturday, November 7 "
+        "and arrives at Aéroport de Paris-Charles de Gaulle at 10:20 AM on Sunday, November 8. "
+        "Total duration 23 hr 20 min."
+    )
+    its, unparsed = rows_to_itineraries([unpriced, RESEARCH_ROW], q, "best_load", "u")
+    assert unparsed == [] and len(its) == 1 and its[0].row_index == 1 and its[0].raw["rows_unpriced"] == 1
+
+
+def test_best_falls_back_to_first_priced_row_when_row0_is_unpriced():
+    from flight_scraper.models import Pick
+    from tests.conftest import make_it
+
+    cands = [make_it(900, 600, idx=1), make_it(700, 900, idx=2, source="cheapest_load")]
+    picks = select_picks(cands, native=frozenset(Pick))
+    assert picks[Pick.BEST].row_index == 1 and picks[Pick.BEST].raw["best_row0_unpriced"]
+    assert picks[Pick.BEST].pick_rule == "native"
+
+
+@pytest.mark.skipif(not (YQB_CDG / "best_rows.json").exists(), reason="fixture not captured")
+def test_thin_route_fixture_yqb_cdg_dedups_picks():
+    """YQB-CDG: unpriced rows excluded, and the Best/Cheapest/Fastest picks share one outbound (dedup)."""
+    from flight_scraper.models import Pick
+
+    q = SearchQuery.model_validate_json((YQB_CDG / "query.json").read_text(encoding="utf-8"))
+    cands = []
+    for load in ("best", "cheapest", "duration"):
+        rows = json.loads((YQB_CDG / f"{load}_rows.json").read_text(encoding="utf-8"))
+        its, unparsed = rows_to_itineraries(rows, q, f"{load}_load", f"https://example/{load}")
+        assert unparsed == [] and its and its[0].raw.get("rows_unpriced", 0) >= 1
+        cands.extend(its)
+    picks = select_picks(cands, native=frozenset(Pick))
+    assert len(picks) == 3
+    identities = {p.identity() for p in picks.values()}
+    assert len(identities) < 3  # at least two picks coincide → only one booking visit was needed (5 loads)
+    assert (YQB_CDG / "booking_best.txt").exists() and not (YQB_CDG / "booking_cheapest.txt").exists()

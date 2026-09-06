@@ -33,8 +33,13 @@ def select_picks(cands: list[Itinerary], native: frozenset[Pick]) -> dict[Pick, 
         raise ValueError("no candidates to pick from")
     out: dict[Pick, Itinerary] = {}
     if Pick.BEST in native:  # Google: first row of the default load = "Top departing flights" #1
-        best = next((c for c in cands if c.candidate_source == "best_load" and c.row_index == 0), None)
-        if best is not None:
+        # first row of the default load; if row 0 had no price ("Total price is unavailable") take the
+        # first priced row of that load — still Google's own ranking, so pick_rule stays 'native'
+        pool = sorted((c for c in cands if c.candidate_source == "best_load"), key=lambda c: c.row_index)
+        if pool:
+            best = pool[0]
+            if best.row_index != 0:
+                best.raw["best_row0_unpriced"] = True
             out[Pick.BEST] = best
     if Pick.CHEAPEST in native:  # min price over the Cheapest-tab load (OTA fares included); tie → shorter
         pool = [c for c in cands if c.candidate_source == "cheapest_load"] or cands
