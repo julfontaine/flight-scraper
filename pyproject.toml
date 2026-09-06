@@ -1,0 +1,49 @@
+[project]
+name = "flight-scraper"
+version = "0.1.0"
+description = "Daily Google Flights scraper for YQB/YUL round trips (cheapest / fastest / best) into Supabase"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+  "playwright==1.62.*",
+  "supabase>=2.31",
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
+  "typer>=0.12",
+  "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.5",
+  "pglast>=6.0",
+]
+# Optional cross-check of the in-repo tfs encoder against a third-party builder (never a runtime dependency).
+xcheck = ["fast-flights"]
+# Optional stealth engine (FS_BROWSER_ENGINE=patchright); see README "Enabling patchright".
+stealth = ["patchright==1.62.*"]
+
+[project.scripts]
+flight-scraper = "flight_scraper.cli:app"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["flight_scraper*"]
+
+[tool.pytest.ini_options]
+markers = ["live: hits real sites/DB, opt-in"]
+addopts = "-m 'not live'"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = [".prompts", "out", "artifacts", "profiles"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]

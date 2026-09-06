@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from flight_scraper import cli
+from flight_scraper.config import Settings
+
+runner = CliRunner()
+
+
+@pytest.fixture
+def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point out/ and artifacts/ at tmp and make sure no Supabase creds leak in from a real .env."""
+    for k in ("SUPABASE_URL", "SUPABASE_SERVICE_KEY", "FS_MAX_PAGE_LOADS"):
+        monkeypatch.delenv(k, raising=False)
+
+    def fake_from_env(cls=None, env_file=None):
+        return Settings(
+            out_dir=tmp_path / "out", artifacts_dir=tmp_path / "artifacts", profiles_dir=tmp_path / "p"
+        )
+
+    monkeypatch.setattr(cli.Settings, "from_env", classmethod(lambda cls, env_file=None: fake_from_env()))
+    return tmp_path
+
+
+def test_sources_lists_nine_with_reasons():
+    result = runner.invoke(cli.app, ["sources"])
+    assert result.exit_code == 0, result.output
+    lines = [line for line in result.output.splitlines() if line and not line.startswith("id ")]
+    assert len(lines) == 9
+    assert lines[0].startswith("google_flights") and " yes " in lines[0]
+    assert sum(" no " in line for line in lines) == 8
+    assert "Research: finding category=westjet" in result.output
+
+
+def test_watchlist_lists_144_cells(isolated: Path):
+    result = runner.invoke(cli.app, ["watchlist", "--run-date", "2026-09-04"])
+    assert result.exit_code == 0, result.output
+    assert "= 144 cells" in result.output
+    assert "google_flights:YUL-CDG:+60:1a" in result.output
+    assert "2026-11-07 -> 2026-11-14" in result.output  # +60 from 2026-09-04 snapped to Saturday
+
+
+def test_plan_prints_at_most_5_searches_at_40_loads(isolated: Path):
+    result = runner.invoke(cli.app, ["plan", "--explain"])
+    assert result.exit_code == 0, result.output
+    assert "-> 4 searches planned" in result.output
+    assert "budget 40 loads" in result.output
+    assert "score=" in result.output
+
+
+def test_run_dry_run_end_to_end_records_phase_state(isolated: Path):
+    result = runner.invoke(
+        cli.app,
+        [
+            "run",
+            "--dry-run",
+            "--source",
+            "google_flights",
+            "--route",
+            "YUL-CDG",
+            "--pax",
+            "1a",
+            "--offset",
+            "60",
+        ],
+    )
+    assert result.exit_code in (0, 3), result.output
+    files = list((isolated / "out").glob("*.json"))
+    files = [f for f in files if f.name != "rotation_state.json"]
+    assert len(files) == 1
+    data = json.loads(files[0].read_text())
+    assert data["run"]["dry_run"] is True and data["run"]["status"] in ("ok", "failed", "partial")
+    assert len(data["searches"]) == 1
+    s = data["searches"][0]
+    assert s["query"]["cell_key"] == "google_flights:YUL-CDG:+60:1a"
+    assert s["query"]["pax"]["child_ages"] == []
+    assert s["status"] in ("ok", "error")
+    if s["status"] == "error":  # Phase 1: no browser flow yet
+        assert "not implemented" in s["error"] or "phase 2" in s["error"]
+    else:  # Phase 2+: three picks
+        assert set(s["picks"]) == {"best", "cheapest", "fastest"}
+
+
+def test_run_without_credentials_falls_back_to_dry_run(isolated: Path):
+    result = runner.invoke(cli.app, ["run", "--source", "kayak", "--limit", "1"])
+    assert result.exit_code == 0, result.output  # all skipped → nothing attempted
+    assert "falling back to --dry-run" in result.output or "dry-run" in result.output.lower()
+    files = [f for f in (isolated / "out").glob("*.json") if f.name != "rotation_state.json"]
+    assert len(files) == 1
+    data = json.loads(files[0].read_text())
+    assert data["searches"][0]["status"] == "skipped" and "SourceDisabled" in data["searches"][0]["error"]
+
+
+def test_run_no_matching_cells(isolated: Path):
+    result = runner.invoke(cli.app, ["run", "--dry-run", "--route", "YUL-XXX"])
+    assert result.exit_code == 0 and "nothing to do" in result.output

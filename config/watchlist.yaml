@@ -1,0 +1,54 @@
+# config/watchlist.yaml — flight-scraper v1 seed watch-list
+# All dates are RELATIVE to the run date; nothing in this file expires.
+version: 1
+
+defaults:
+  cabin: economy
+  currency: CAD
+  stay_nights: 7
+  # depart_date = first Saturday on/after (run_date + offset_days); return_date = depart_date + stay_nights.
+  date_rule: next_saturday
+  offsets_days: [30, 60, 90]
+
+origins: [YQB, YUL]
+
+destinations:
+  - {code: YYZ, region: domestic,          why: "highest-frequency domestic pair from both origins; AC/Porter/WestJet/Flair compete"}
+  - {code: YVR, region: domestic,          why: "long-haul domestic; nonstop vs 1-stop makes Fastest != Cheapest"}
+  - {code: FLL, region: us_sun,            why: "Florida sun market: AC, Transat, WestJet, Porter, Flair"}
+  - {code: MCO, region: us_sun,            why: "Orlando family market — the child configs matter most here"}
+  - {code: CUN, region: caribbean_mexico,  why: "top sun/package destination; Transat and WestJet pricing"}
+  - {code: CDG, region: europe,            why: "largest transatlantic market from YUL; research golden route (YUL-CDG)"}
+
+# routes = every origin x every destination (12 round-trip routes).
+# Replace with an explicit list of {origin, destination, active} entries to skip a pair.
+routes: all
+
+passenger_configs:
+  # key is used in CLI filters (--pax 1a) and in out/ file names. priority weights the rotation (higher = fresher).
+  - {key: 1a,   adults: 1, children: 0, child_ages: [],     priority: 3}
+  - {key: 2a,   adults: 2, children: 0, child_ages: [],     priority: 2}
+  - {key: 1a1c, adults: 1, children: 1, child_ages: [],     priority: 1}   # Google: child = 2–11, no age
+  - {key: 1a2c, adults: 1, children: 2, child_ages: [],     priority: 1}
+
+budget:
+  max_page_loads_per_run: 40         # hard cap; a search starts only if remaining >= est_page_loads_per_search
+  est_page_loads_per_search: 9       # 3 results loads + 3 x (return-list render + booking page)
+  max_searches_per_run: 8            # secondary cap even when dedup makes searches cheaper
+  booking_visits: all                # all | best_only | none   (lever B below)
+  delays_s:                          # uniform random, seconds
+    between_actions: [2, 5]          # clicks inside one page (expand list, select outbound/return)
+    between_loads: [4, 9]            # between navigations
+    between_searches: [20, 45]
+  retry:
+    per_search_attempts: 2           # 1 retry on timeout / zero rows without block markers
+    retry_pause_s: [15, 30]
+  block_pause_s: [60, 120]
+  abort_after_consecutive_blocks: 2
+
+rotation:
+  strategy: weighted_oldest_first    # score = priority x days_since_last_ok (never-scraped cells first, then by score desc)
+  state: supabase                    # supabase | file  (file = out/rotation_state.json, used automatically in --dry-run)
+
+sources:
+  - google_flights                   # the only enabled adapter in v1; disabled stubs are listed by `cli sources`

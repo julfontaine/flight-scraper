@@ -556,7 +556,7 @@ def local_v1(cands: list[Itinerary], pick: Pick) -> Itinerary:
   <phases>
     <!-- Prompt 003 executes these in order, one prompt each, and sets status="done" on completion. -->
 
-    <phase number="1" name="Scaffold, config, schema, models and pure functions" status="pending">
+    <phase number="1" name="Scaffold, config, schema, models and pure functions" status="done">
       <objective>Produce an installable package whose non-browser core is complete and unit-tested: watch-list loading and cell expansion, relative-date resolution, the Google `tfs` URL builder (golden-tested), pick selection, the rotation scheduler, the dry-run sink, a CLI that lists all nine sources, one adapter module per source (eight disabled stubs), and the paste-ready Supabase migration — with zero network or browser use.</objective>
       <tasks>
         <task priority="high">Create `pyproject.toml` (Python ≥ 3.12; deps: `playwright==1.62.*`, `supabase>=2.31`, `pydantic>=2.7`, `pyyaml`, `typer`, `python-dotenv`; dev: `pytest`, `ruff`, `pglast` (SQL syntax test), `faster-flights` (optional encoder cross-check); `[tool.pytest.ini_options] markers = ["live: hits real sites/DB, opt-in"]`, `addopts = "-m 'not live'"`; ruff line-length 110, target py312).</task>

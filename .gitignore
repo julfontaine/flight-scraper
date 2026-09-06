@@ -6,3 +6,8 @@ out/
 artifacts/
 .pytest_cache/
 .ruff_cache/
+
+# Local runtime state (git-ignored)
+logs/
+profiles/
+*.egg-info/
