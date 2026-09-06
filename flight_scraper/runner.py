@@ -253,7 +253,8 @@ class Runner:
                     self.sleeper.block_pause()
                 else:
                     consecutive_blocks = 0
-                if i + 1 < len(queries) and result.status != "skipped":
+                more = i + 1 < len(queries) and self.page_budget.can_start_search(est)
+                if more and result.status != "skipped":
                     self.sleeper.between_searches()
         finally:
             self._close_sessions()
@@ -290,8 +291,8 @@ class Runner:
         ok = [r for r in attempted if r.status in ("ok", "partial")]
         if not attempted:
             return "ok"  # nothing attempted (all skipped) is not a failure
-        if len(ok) == len(attempted) and not aborted:
-            return "ok"
+        if len(ok) == len(attempted) and (not aborted or aborted.startswith("budget")):
+            return "ok"  # stopping because the page-load budget is spent is the normal end of a run
         if not ok:
             return "failed"
         return "partial"

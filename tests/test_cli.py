@@ -53,7 +53,26 @@ def test_plan_prints_at_most_5_searches_at_40_loads(isolated: Path):
     assert "score=" in result.output
 
 
-def test_run_dry_run_end_to_end_records_phase_state(isolated: Path):
+@pytest.fixture
+def no_browser(monkeypatch: pytest.MonkeyPatch):
+    """Fake Google adapter + null browser session: the full CLI pipeline without Playwright or network."""
+    import contextlib
+
+    import flight_scraper.browser as browser
+    import flight_scraper.runner as runner_mod
+    from tests.conftest import FakeGoogleAdapter
+
+    @contextlib.contextmanager
+    def null_context(settings, source_id):
+        yield None
+
+    monkeypatch.setattr(browser, "open_context", null_context)
+    monkeypatch.setattr(
+        runner_mod, "REGISTRY", dict(runner_mod.REGISTRY) | {"google_flights": FakeGoogleAdapter}
+    )
+
+
+def test_run_dry_run_end_to_end_records_phase_state(isolated: Path, no_browser):
     result = runner.invoke(
         cli.app,
         [
@@ -69,7 +88,7 @@ def test_run_dry_run_end_to_end_records_phase_state(isolated: Path):
             "60",
         ],
     )
-    assert result.exit_code in (0, 3), result.output
+    assert result.exit_code == 0, result.output
     files = list((isolated / "out").glob("*.json"))
     files = [f for f in files if f.name != "rotation_state.json"]
     assert len(files) == 1
@@ -79,11 +98,11 @@ def test_run_dry_run_end_to_end_records_phase_state(isolated: Path):
     s = data["searches"][0]
     assert s["query"]["cell_key"] == "google_flights:YUL-CDG:+60:1a"
     assert s["query"]["pax"]["child_ages"] == []
-    assert s["status"] in ("ok", "error")
-    if s["status"] == "error":  # Phase 1: no browser flow yet
-        assert "not implemented" in s["error"] or "phase 2" in s["error"]
-    else:  # Phase 2+: three picks
-        assert set(s["picks"]) == {"best", "cheapest", "fastest"}
+    assert s["status"] == "ok" and set(s["picks"]) == {"best", "cheapest", "fastest"}
+    assert s["picks"]["best"]["price_stage"] == "booking" and s["picks"]["best"]["luggage_source"]
+    assert data["run"]["page_loads"] == 9
+    state = json.loads((isolated / "out" / "rotation_state.json").read_text())
+    assert state["cells"]["google_flights:YUL-CDG:+60:1a"]["last_ok_at"]
 
 
 def test_run_without_credentials_falls_back_to_dry_run(isolated: Path):

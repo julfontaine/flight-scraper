@@ -56,3 +56,64 @@ def make_it(
         row_index=idx,
         raw=dict(raw),
     )
+
+
+# ------------------------------------------------------------------ fake adapter (no browser)
+def fake_google_picks(query: SearchQuery) -> dict:
+    """Three picks the way the live adapter would return them (booking stage), without a browser."""
+    from flight_scraper.models import Pick, PriceStage, Provider
+
+    out = {}
+    for pick, price, dur in (
+        (Pick.BEST, 900.0, 600),
+        (Pick.CHEAPEST, 700.0, 900),
+        (Pick.FASTEST, 1200.0, 420),
+    ):
+        it = make_it(price, dur, source=f"{pick.value}_load")
+        it.price_total_cad = price
+        it.price_provider = "Air Canada"
+        it.price_stage = PriceStage.BOOKING
+        it.providers = [Provider(name="Air Canada", total_cad=price, is_airline=True)]
+        it.carry_on_included = True
+        it.checked_bag_fee_cad = 70.0
+        it.luggage_source = "google_booking_page"
+        it.deep_link_url = "https://www.google.com/travel/flights/booking?tfs=FAKE"
+        out[pick] = it
+    return out
+
+
+class FakeGoogleAdapter:
+    """Drop-in for REGISTRY['google_flights'] in CLI/runner tests: 9 page loads, three booking-stage picks."""
+
+    source_id = "google_flights"
+    name = "Google Flights (fake)"
+    kind = "meta"
+    enabled = True
+    disabled_reason = None
+    priority = 1
+    loads_per_search = 9
+    fail_with: Exception | None = None
+
+    def __init__(self, settings=None, budget_cfg=None, budget=None, sleeper=None, artifacts=None):
+        self.budget = budget
+        self.calls: list[SearchQuery] = []
+
+    def build_url(self, query: SearchQuery, variant=None) -> str:
+        return f"https://www.google.com/travel/flights/search?tfs=FAKE&route={query.route_key}"
+
+    def run_search(self, page, query: SearchQuery):
+        from flight_scraper.models import SearchResult
+
+        self.calls.append(query)
+        if self.budget is not None:
+            self.budget.consume(self.loads_per_search)
+        if self.fail_with is not None:
+            raise self.fail_with
+        return SearchResult(
+            query=query,
+            status="ok",
+            picks=fake_google_picks(query),
+            candidates=20,
+            page_url=self.build_url(query),
+            page_loads=self.loads_per_search,
+        )

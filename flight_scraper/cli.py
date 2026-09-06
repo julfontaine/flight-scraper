@@ -210,10 +210,24 @@ def _execute(
     queries: list[SearchQuery],
     dry_run: bool,
     max_loads: int,
+    capture_dir: Path | None = None,
 ):
+    import uuid
+
+    from .browser import BrowserArtifacts, open_context
     from .runner import Runner  # local: keeps `sources`/`plan` import-light
 
+    run_id = str(uuid.uuid4())
     sink = DryRunSink(settings.out_dir)
+    adapters = None
+    if capture_dir is not None:
+        from .adapters.google_flights.adapter import GoogleFlightsAdapter
+
+        class CapturingGoogle(GoogleFlightsAdapter):  # writes sanitised fixtures next to the parsers' tests
+            def __init__(self, *a, **kw):
+                super().__init__(*a, capture_dir=capture_dir, **kw)
+
+        adapters = dict(REGISTRY) | {"google_flights": CapturingGoogle}
     runner = Runner(
         settings,
         wl,
@@ -221,18 +235,52 @@ def _execute(
         state,
         dry_run=dry_run,
         page_budget=PageLoadBudget(max_loads),
-        session_factory=_session_factory(settings),
+        session_factory=lambda source_id: open_context(settings, source_id),
+        artifacts=BrowserArtifacts(settings.artifacts_dir, run_id),
+        adapters=adapters,
+        run_id=run_id,
     )
     return runner.run(queries)
 
 
-def _session_factory(settings: Settings):
-    """Phase 1: no browser module yet — adapters that need one report 'adapter not implemented'."""
-    try:
-        from .browser import open_context  # noqa: WPS433 - Phase 2 module
-    except ImportError:
-        return None
-    return lambda source_id: open_context(settings, source_id)
+@app.command()
+def capture(
+    watchlist: WatchlistOpt = None,
+    route: Annotated[str, typer.Option(help="e.g. YUL-CDG")] = "YUL-CDG",
+    pax: Annotated[str, typer.Option(help="e.g. 1a")] = "1a",
+    offset: Annotated[int, typer.Option()] = 60,
+    depart: Annotated[str | None, typer.Option(help="ad-hoc depart date YYYY-MM-DD")] = None,
+    out: Annotated[
+        Path | None, typer.Option(help="fixture dir (default tests/fixtures/google_flights/<route>)")
+    ] = None,
+    headed: Annotated[bool, typer.Option("--headed")] = False,
+) -> None:
+    """Run ONE Google Flights search (dry-run) and save sanitised fixtures for the parser tests."""
+    settings, wl = _load(watchlist)
+    if headed:
+        settings.headed = True
+    state = FileRotationState(settings.out_dir / "rotation_state.json")
+    filters = _filters("google_flights", route, pax, offset)
+    queries = build_queries(
+        wl, settings, state, filters, date.fromisoformat(depart) if depart else None, None, 1
+    )
+    if not queries:
+        typer.echo("no cell matches the filters")
+        raise typer.Exit(code=1)
+    q = queries[0]
+    fixture_dir = out or (settings.project_root / "tests" / "fixtures" / "google_flights" / q.route_key)
+    if fixture_dir.exists():  # never mix two captures (a deduplicated pick writes no booking file)
+        for stale in fixture_dir.iterdir():
+            if stale.is_file():
+                stale.unlink()
+    typer.echo(f"capturing {q.search_key} -> {fixture_dir}")
+    report = _execute(settings, wl, state, [q], True, wl.budget.est_page_loads_per_search, fixture_dir)
+    (fixture_dir / "query.json").write_text(q.model_dump_json(indent=2), encoding="utf-8")
+    typer.echo(
+        f"status={report.run.status} page_loads={report.run.page_loads} files: "
+        f"{sorted(p.name for p in fixture_dir.iterdir())}"
+    )
+    raise typer.Exit(code=report.exit_code)
 
 
 @app.command("show")
