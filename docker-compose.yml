@@ -1,0 +1,28 @@
+# Local PostgreSQL for running flight-scraper without Supabase (same migration, same tables and views).
+#   just up          # start the database (first start also applies supabase/migrations/0001_init.sql)
+#   just migrate     # re-apply the migration (idempotent) after pulling schema changes
+# The scraper itself keeps running on the host (residential IP): set DATABASE_URL in .env, see .env.example.
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: flight-scraper-db
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"   # 5433 on the host so it never clashes with another local Postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-flights}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Runs once, on an empty data volume, in name order: roles first, then the shared migration.
+      - ./docker/postgres/initdb/01_roles.sql:/docker-entrypoint-initdb.d/01_roles.sql:ro
+      - ./supabase/migrations/0001_init.sql:/docker-entrypoint-initdb.d/02_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-flights}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:

@@ -13,7 +13,7 @@ import typer
 from .adapters import REGISTRY
 from .config import CellFilters, Settings, WatchList, expand_cells, filter_cells
 from .dates import run_local_date
-from .db import DryRunSink, Sink, SupabaseRotationState, SupabaseSink
+from .db import Backend, DryRunSink, PostgresBackend, Sink, SupabaseBackend, connect_postgres
 from .models import SearchQuery
 from .pacing import PageLoadBudget
 from .scheduler import FileRotationState, RotationState, explain_plan, plan_run
@@ -89,23 +89,39 @@ def _supabase_client(settings: Settings):
     return create_client(settings.supabase_url, settings.supabase_service_key)
 
 
-def _rotation_state(settings: Settings, wl: WatchList, dry_run: bool, client=None) -> RotationState:
-    """Supabase ``cell_last_scraped`` when credentials exist and this is not a dry run; else the file."""
-    if not dry_run and settings.has_supabase and wl.rotation.state == "supabase":
+def _pg_conn(settings: Settings):
+    return connect_postgres(settings.database_url)  # lazy import inside
+
+
+def _backend(settings: Settings) -> Backend | None:
+    """PostgreSQL when DATABASE_URL is set, else Supabase when its pair is set, else None (dry-run only)."""
+    if settings.db_backend == "postgres":
+        return PostgresBackend(_pg_conn(settings), settings)
+    if settings.db_backend == "supabase":
+        return SupabaseBackend(_supabase_client(settings), settings)
+    return None
+
+
+def _rotation_state(
+    settings: Settings, wl: WatchList, dry_run: bool, backend: Backend | None = None
+) -> RotationState:
+    """``cell_last_scraped`` from the database when configured and not a dry run; else the file."""
+    if not dry_run and backend is not None and wl.rotation.state in ("db", "supabase"):
         try:
-            client = client or _supabase_client(settings)
             pax_keys = {(p.adults, p.children): p.key for p in wl.passenger_configs}
-            return SupabaseRotationState(client, list(wl.sources), pax_keys)
+            return backend.rotation_state(list(wl.sources), pax_keys)
         except Exception as exc:  # noqa: BLE001 - fall back, never abort a run for the planner
-            log.warning("rotation state from Supabase failed (%s); using out/rotation_state.json", exc)
+            log.warning(
+                "rotation state from %s failed (%s); using out/rotation_state.json", backend.label, exc
+            )
     return FileRotationState(settings.out_dir / "rotation_state.json")
 
 
-def _sink(settings: Settings, dry_run: bool, client=None) -> Sink:
+def _sink(settings: Settings, dry_run: bool, backend: Backend | None = None) -> Sink:
     companion = DryRunSink(settings.out_dir)  # the JSON file is always written (replayable)
-    if dry_run or not settings.has_supabase:
+    if dry_run or backend is None:
         return companion
-    return SupabaseSink(client or _supabase_client(settings), companion=companion)
+    return backend.sink(companion=companion)
 
 
 # ------------------------------------------------------------------ plan
@@ -217,13 +233,16 @@ def run(
     global _RUN_FLAGS
     _RUN_FLAGS = {"capture_rpc": capture_rpc, "pax_derive": experimental_pax_derive}
     max_loads = budget or settings.max_page_loads_override or wl.budget.max_page_loads_per_run
-    if not dry_run and not settings.has_supabase:
-        msg = "SUPABASE_URL / SUPABASE_SERVICE_KEY not set: falling back to --dry-run (out/<run_id>.json)"
+    if not dry_run and not settings.has_db:
+        msg = (
+            "no database configured (DATABASE_URL or SUPABASE_URL/SUPABASE_SERVICE_KEY): "
+            "falling back to --dry-run (out/<run_id>.json)"
+        )
         log.warning(msg)
         typer.echo(f"warning: {msg}")
         dry_run = True
-    client = None if dry_run else _supabase_client(settings)
-    state = _rotation_state(settings, wl, dry_run, client)
+    backend = None if dry_run else _backend(settings)
+    state = _rotation_state(settings, wl, dry_run, backend)
     filters = _filters(source, route, pax, offset)
     queries = build_queries(
         wl,
@@ -237,7 +256,9 @@ def run(
     if not queries:
         typer.echo("nothing to do (filters matched no cells or budget is zero)")
         raise typer.Exit(code=0)
-    report = _execute(settings, wl, state, queries, dry_run, max_loads, sink=_sink(settings, dry_run, client))
+    report = _execute(
+        settings, wl, state, queries, dry_run, max_loads, sink=_sink(settings, dry_run, backend)
+    )
     typer.echo(
         f"run {report.run.run_id}: status={report.run.status} searches={len(report.results)} "
         f"ok={report.run.searches_ok} error={report.run.searches_error} "
@@ -245,8 +266,8 @@ def run(
         f"page_loads={report.run.page_loads} elapsed={report.elapsed_s:.0f}s"
     )
     typer.echo(f"output: {settings.out_dir / (report.run.run_id + '.json')}")
-    if not dry_run:
-        typer.echo(f"upserted into Supabase project {settings.supabase_project_ref}")
+    if not dry_run and backend is not None:
+        typer.echo(f"upserted into {backend.label}")
     from .browser import prune_artifacts
 
     removed = prune_artifacts(settings.artifacts_dir, days=ARTIFACT_RETENTION_DAYS)
@@ -349,29 +370,27 @@ def _latest_run_file(out_dir: Path) -> Path | None:
 
 
 def _last_run_summary(settings: Settings, wl: WatchList) -> dict | None:
-    """Latest run: Supabase ``search_runs`` when credentials exist, else the newest out/ file."""
-    if settings.has_supabase:
+    """Latest run: ``search_runs`` from the configured database if any, else the newest out/ file."""
+    if settings.has_db:
         try:
-            client = _supabase_client(settings)
-            runs = (
-                client.table("search_runs").select("*").order("started_at", desc=True).limit(1).execute().data
-            )
-            if runs:
-                run = runs[0]
-                searches = (
-                    client.table("searches").select("status,error").eq("run_id", run["run_id"]).execute().data
-                )
+            backend = _backend(settings)
+            got = backend.last_run() if backend is not None else None
+            if got:
+                run, searches = got
+                started = run["started_at"]
+                if not isinstance(started, datetime):
+                    started = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
                 return {
-                    "source": f"supabase:{settings.supabase_project_ref}",
-                    "run_id": run["run_id"],
+                    "source": backend.label,
+                    "run_id": str(run["run_id"]),
                     "status": run["status"],
-                    "started_at": datetime.fromisoformat(str(run["started_at"]).replace("Z", "+00:00")),
+                    "started_at": started,
                     "page_loads": run.get("page_loads"),
                     "searches": [{"status": x["status"], "error": x.get("error")} for x in searches],
                     "itineraries": None,
                 }
         except Exception as exc:  # noqa: BLE001 - fall back to the local file
-            log.warning("health: Supabase unavailable (%s); reading out/", exc)
+            log.warning("health: database unavailable (%s); reading out/", exc)
     path = _latest_run_file(settings.out_dir)
     if path is None:
         return None
@@ -397,7 +416,7 @@ def health(watchlist: WatchlistOpt = None) -> None:
     last = _last_run_summary(settings, wl)
     now = datetime.now(UTC)
     if last is None:
-        problems.append("no run recorded yet (no out/*.json and no Supabase run)")
+        problems.append("no run recorded yet (no out/*.json and no database run)")
     else:
         started = last["started_at"] if last["started_at"].tzinfo else last["started_at"].replace(tzinfo=UTC)
         age_h = (now - started).total_seconds() / 3600
@@ -507,31 +526,25 @@ def prune_artifacts_cmd(
 
 @app.command("db-check")
 def db_check() -> None:
-    """Connect to Supabase, count sources/routes/latest_prices, print the last 3 runs (exit 1 on failure)."""
+    """Connect to the database, count sources/routes/latest_prices, list the last 3 runs (exit 1 on error)."""
     settings = Settings.from_env()
     _setup_logging(settings.log_level)
-    if not settings.has_supabase:
-        typer.echo("SUPABASE_URL / SUPABASE_SERVICE_KEY not set (.env)")
+    if not settings.has_db:
+        typer.echo("DATABASE_URL or SUPABASE_URL / SUPABASE_SERVICE_KEY not set (.env)")
         raise typer.Exit(code=1)
-    typer.echo(f"project: {settings.supabase_project_ref}")  # never the key
+    typer.echo(f"database: {settings.db_label}")  # never the key / password
     try:
-        client = _supabase_client(settings)
-        for table in ("sources", "routes", "latest_prices"):
-            resp = client.table(table).select("*", count="exact").limit(1).execute()
-            typer.echo(f"{table:<14} {resp.count} rows")
-        runs = (
-            client.table("search_runs")
-            .select("run_id,started_at,status,page_loads,searches_ok,searches_blocked")
-            .order("started_at", desc=True)
-            .limit(3)
-            .execute()
-        )
-        for r in runs.data or []:
+        backend = _backend(settings)
+        assert backend is not None
+        for table, n in backend.counts(["sources", "routes", "latest_prices"]).items():
+            typer.echo(f"{table:<14} {n} rows")
+        runs = backend.recent_runs(3)
+        for r in runs:
             typer.echo(
                 f"run {r['run_id']} {r['started_at']} {r['status']} loads={r['page_loads']} "
                 f"ok={r['searches_ok']} blocked={r['searches_blocked']}"
             )
-        if not runs.data:
+        if not runs:
             typer.echo("no runs yet")
     except Exception as exc:  # noqa: BLE001 - report and exit 1
         typer.echo(f"db-check FAILED: {type(exc).__name__}: {exc}")

@@ -26,6 +26,7 @@ IATA_RE = re.compile(r"^[A-Z]{3}$")
 class Settings:
     supabase_url: str | None = None
     supabase_service_key: str | None = None
+    database_url: str | None = None  # plain PostgreSQL (docker compose); wins over Supabase when set
     browser_engine: Literal["playwright", "patchright"] = "playwright"
     headed: bool = False
     max_page_loads_override: int | None = None
@@ -39,6 +40,32 @@ class Settings:
     @property
     def has_supabase(self) -> bool:
         return bool(self.supabase_url and self.supabase_service_key)
+
+    @property
+    def has_postgres(self) -> bool:
+        return bool(self.database_url)
+
+    @property
+    def has_db(self) -> bool:
+        return self.has_postgres or self.has_supabase
+
+    @property
+    def db_backend(self) -> Literal["postgres", "supabase"] | None:
+        """``postgres`` when DATABASE_URL is set, else ``supabase`` when its pair is set, else None."""
+        if self.has_postgres:
+            return "postgres"
+        if self.has_supabase:
+            return "supabase"
+        return None
+
+    @property
+    def db_label(self) -> str:
+        """Printable backend name: never the key, never the password."""
+        if self.has_postgres:
+            return re.sub(r"://([^:/@]+):[^@]*@", r"://\1@", str(self.database_url))
+        if self.has_supabase:
+            return f"supabase:{self.supabase_project_ref}"
+        return "none"
 
     @property
     def supabase_project_ref(self) -> str | None:
@@ -58,6 +85,7 @@ class Settings:
         return cls(
             supabase_url=os.environ.get("SUPABASE_URL") or None,
             supabase_service_key=os.environ.get("SUPABASE_SERVICE_KEY") or None,
+            database_url=os.environ.get("DATABASE_URL") or None,
             browser_engine=engine,  # type: ignore[arg-type]
             headed=os.environ.get("FS_HEADED", "0") in ("1", "true", "yes"),
             max_page_loads_override=int(override) if override else None,
@@ -139,7 +167,7 @@ class Budget(BaseModel):
 
 class Rotation(BaseModel):
     strategy: Literal["weighted_oldest_first"] = "weighted_oldest_first"
-    state: Literal["supabase", "file"] = "supabase"
+    state: Literal["db", "supabase", "file"] = "db"  # "supabase" is kept as an alias of "db"
 
 
 class WatchList(BaseModel):

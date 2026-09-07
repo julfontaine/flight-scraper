@@ -48,7 +48,7 @@ budget:
 
 rotation:
   strategy: weighted_oldest_first    # score = priority x days_since_last_ok (never-scraped cells first, then by score desc)
-  state: supabase                    # supabase | file  (file = out/rotation_state.json, used automatically in --dry-run)
+  state: db                          # db | file  (db = cell_last_scraped view in Postgres/Supabase; file = out/rotation_state.json, used automatically in --dry-run)
 
 sources:
   - google_flights                   # the only enabled adapter in v1; disabled stubs are listed by `cli sources`

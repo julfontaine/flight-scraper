@@ -142,7 +142,7 @@ def test_run_with_credentials_uses_supabase_sink_and_state(isolated: Path, no_br
         cli.app, ["run", "--source", "google_flights", "--route", "YUL-CDG", "--pax", "1a", "--offset", "60"]
     )
     assert result.exit_code == 0, result.output
-    assert "upserted into Supabase project abcdefgh" in result.output and "sb_secret" not in result.output
+    assert "upserted into supabase:abcdefgh" in result.output and "sb_secret" not in result.output
     tables = [c[0] for c in fake.calls]
     assert "cell_last_scraped" in tables and "search_runs" in tables and "searches" in tables
     assert "itineraries" in tables and len(fake.itineraries) == 3
@@ -153,3 +153,58 @@ def test_run_with_credentials_uses_supabase_sink_and_state(isolated: Path, no_br
 def test_db_check_without_credentials_exits_1(isolated: Path):
     result = runner.invoke(cli.app, ["db-check"])
     assert result.exit_code == 1 and "not set" in result.output
+
+
+def test_run_with_database_url_uses_postgres_sink_and_state(isolated: Path, no_browser, monkeypatch):
+    """DATABASE_URL + not --dry-run → PostgresSink (JSON companion kept) + rotation state from the view."""
+    from tests.test_db_postgres import FakePg
+
+    fake = FakePg()
+    monkeypatch.setattr(
+        cli.Settings,
+        "from_env",
+        classmethod(
+            lambda c, env_file=None: Settings(
+                database_url="postgres://scraper:s3cret@localhost:5433/flights",
+                supabase_url="https://abcdefgh.supabase.co",  # both set: DATABASE_URL wins
+                supabase_service_key="sb_secret_x",
+                out_dir=isolated / "out",
+                artifacts_dir=isolated / "artifacts",
+            )
+        ),
+    )
+    monkeypatch.setattr(cli, "_pg_conn", lambda settings: fake)
+    monkeypatch.setattr(
+        cli, "_supabase_client", lambda settings: pytest.fail("Supabase client must not be used")
+    )
+    result = runner.invoke(
+        cli.app, ["run", "--source", "google_flights", "--route", "YUL-CDG", "--pax", "1a", "--offset", "60"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "upserted into postgres://scraper@localhost:5433/flights" in result.output
+    assert "s3cret" not in result.output
+    sql = " ".join(s.lower() for s, _ in fake.calls)
+    assert (
+        "from cell_last_scraped" in sql and "insert into search_runs" in sql and "insert into searches" in sql
+    )
+    assert len(fake.itineraries) == 3
+    files = [f for f in (isolated / "out").glob("*.json") if f.name != "rotation_state.json"]
+    assert len(files) == 1
+
+
+def test_db_check_with_database_url(isolated: Path, monkeypatch):
+    from tests.test_db_postgres import FakePg
+
+    fake = FakePg()
+    monkeypatch.setattr(
+        cli.Settings,
+        "from_env",
+        classmethod(lambda c, env_file=None: Settings(database_url="postgres://u:pw@h:5433/flights")),
+    )
+    monkeypatch.setattr(cli, "_pg_conn", lambda settings: fake)
+    result = runner.invoke(cli.app, ["db-check"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "postgres://u@h:5433/flights" in result.output and "pw" not in result.output.split("flights")[0][-4:]
+    )
+    assert "sources" in result.output and "no runs yet" in result.output

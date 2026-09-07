@@ -3,7 +3,8 @@
 Scheduled Python + Playwright scraper for round-trip flights departing **YQB** and **YUL**.
 For every watch-list cell (route × departure offset × passenger configuration) it records the **cheapest**,
 **fastest** and **best** itinerary with the booking-page total (taxes + fees, all passengers), carry-on /
-checked-bag information and a deep-link URL, then upserts everything into **Supabase** for the website.
+checked-bag information and a deep-link URL, then upserts everything into **PostgreSQL** (a local docker
+compose database, or a Supabase project) for the website.
 
 Only **Google Flights** is enabled in v1. The other eight requested sources (Kayak, Expedia, Skyscanner,
 Air Canada, Air Transat, WestJet, Porter, Flair) ship as disabled adapter stubs carrying the research reason
@@ -28,9 +29,13 @@ captcha) are recorded as data (`blocked=true`, screenshot + HTML in `artifacts/`
 ```bash
 uv venv && uv pip install -e .[dev]          # or: python -m venv .venv && .venv/bin/pip install -e .[dev]
 playwright install chromium                  # add --with-deps on a fresh Ubuntu/WSL2
-cp .env.example .env                         # fill SUPABASE_URL / SUPABASE_SERVICE_KEY (sb_secret_...)
+cp .env.example .env                         # DATABASE_URL (local Postgres) or SUPABASE_URL / SUPABASE_SERVICE_KEY
+just up                                      # local PostgreSQL 16 in docker compose, migration applied on first start
 pytest -q                                    # unit + fixture tests; live tests are skipped
 ```
+
+`just` lists every recipe (`up`, `down`, `migrate`, `psql`, `db-check`, `health`, `run`, `dry-run`, `test`,
+`test-live-db`). Docker and `just` are only needed for the local database; with Supabase (below) skip `just up`.
 
 Optional: `uv pip install -e .[stealth]` + `sudo apt install xvfb` for the patchright engine
 (`FS_BROWSER_ENGINE=patchright FS_HEADED=1`), only if Google starts serving `/sorry/` or 429 pages.
@@ -41,7 +46,8 @@ Environment (`.env`, git-ignored; `.env.example` documents it):
 
 | variable | meaning |
 |---|---|
-| `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` | server-side project URL + `sb_secret_…` key; absent → dry-run only |
+| `DATABASE_URL` | plain PostgreSQL DSN (`postgres://postgres:postgres@localhost:5433/flights` with `just up`); wins over Supabase when both are set |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` | server-side project URL + `sb_secret_…` key; neither backend set → dry-run only |
 | `FS_BROWSER_ENGINE` | `playwright` (default, live-verified) or `patchright` |
 | `FS_HEADED` | `1` shows the browser (needs a display or `xvfb-run`) |
 | `FS_MAX_PAGE_LOADS` | one-off override of the nightly page-load budget |
@@ -67,19 +73,19 @@ refresh every ≈ 17 days, 2-adult ≈ 25, child configs ≈ 50:
 python -m flight_scraper.cli sources                 # the nine sources, enabled/disabled + reason
 python -m flight_scraper.cli watchlist               # 144 cells with today's concrete dates
 python -m flight_scraper.cli plan [--explain]        # tonight's rotation order and load estimate
-python -m flight_scraper.cli run                     # nightly run → Supabase (+ out/<run_id>.json)
+python -m flight_scraper.cli run                     # nightly run → database (+ out/<run_id>.json)
 python -m flight_scraper.cli run --dry-run --source google_flights --route YUL-CDG --pax 1a --offset 60
 python -m flight_scraper.cli run --depart 2026-12-19 --route YQB-CUN --pax 2a     # ad-hoc dates
 python -m flight_scraper.cli show out/<run_id>.json  # picks of a run
 python -m flight_scraper.cli capture --route YQB-CDG --pax 1a --offset 60          # refresh test fixtures
 python -m flight_scraper.cli health                  # last run age/status, stale cells, drift alarm (exit 1)
-python -m flight_scraper.cli db-check                # Supabase connectivity, counts, last 3 runs
+python -m flight_scraper.cli db-check                # database connectivity, counts, last 3 runs
 python -m flight_scraper.cli prune-artifacts --days 14
 ```
 
 Exit codes of `run` (and `scripts/run_daily.sh`): `0` ok/partial, `2` blocked, `3` failed.
-Without credentials or with `--dry-run` the run writes `out/<run_id>.json` only; with credentials the JSON
-file is still written next to the Supabase upserts so a failed night can be replayed later.
+Without a database or with `--dry-run` the run writes `out/<run_id>.json` only; with one configured the JSON
+file is still written next to the upserts so a failed night can be replayed later.
 
 Filters: `--source`, `--route YUL-CDG`, `--pax 1a`, `--offset 60`, `--limit N`, `--budget N`, `--headed`.
 
@@ -109,12 +115,25 @@ Logs rotate in-process: `logs/flight-scraper.log` (5 MB × 5) plus journald.
   0 rows (selector drift: compare `artifacts/` with the fixtures and update `parse_results.py`).
 - Rows saying "Total price is unavailable" are skipped (counted in `raw.rows_unpriced`), not errors.
 
-## Supabase schema and the website
+## Database: local PostgreSQL or Supabase
 
-Apply `supabase/migrations/0001_init.sql` once by pasting it into the SQL editor (idempotent; it seeds the
-nine `sources` and the 12 `routes`). Keys: the scraper uses the **`sb_secret_…`** key server-side
-(`SUPABASE_SERVICE_KEY`, bypasses RLS); the website uses the **`sb_publishable_…`** key and, through RLS,
-can only read `itineraries` plus the two public views.
+One migration, `supabase/migrations/0001_init.sql`, serves both backends (idempotent; it seeds the nine
+`sources` and the 12 `routes`). The scraper picks the backend from `.env`: `DATABASE_URL` → plain
+PostgreSQL through psycopg; otherwise `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` → Supabase through its SDK;
+neither → dry-run. Same upserts, same rotation view, same `db-check` / `health` either way.
+
+**Local PostgreSQL (no Supabase account needed).** `docker-compose.yml` runs `postgres:16-alpine` on host
+port **5433** (so it never clashes with another Postgres on 5432) with a named data volume.
+`docker/postgres/initdb/01_roles.sql` creates the `anon` / `authenticated` roles as no-login roles so the
+migration's grants apply unchanged; both scripts run automatically on the first `just up`. `just migrate`
+re-applies the migration after a schema change, `just psql` opens a shell, `just clean` deletes the volume.
+The scraper itself keeps running on the host (residential IP) and connects over `DATABASE_URL`.
+There is no auto-generated REST API in this mode: a website needs a small read-only API in front of
+`latest_prices` (the Supabase publishable-key queries below map 1:1 onto SQL).
+
+**Supabase.** Paste the migration into the SQL editor. Keys: the scraper uses the **`sb_secret_…`** key
+server-side (`SUPABASE_SERVICE_KEY`, bypasses RLS); the website uses the **`sb_publishable_…`** key and,
+through RLS, can only read `itineraries` plus the two public views.
 
 Tables: `sources`, `routes`, `search_runs`, `searches` (natural key + `scrape_date`: a same-day re-run
 overwrites, other days accumulate history), `itineraries` (unique on `(search_id, pick)`).

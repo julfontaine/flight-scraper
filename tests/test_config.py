@@ -83,3 +83,23 @@ def test_settings_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         Settings.from_env(env_file=tmp_path / "missing.env")
     assert "sb_secret" not in (s.supabase_project_ref or "")
     assert os.environ.get("SUPABASE_SERVICE_KEY") == "sb_secret_x"  # never printed, only read
+
+
+def test_settings_database_url_selects_postgres_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    for k in ("SUPABASE_URL", "SUPABASE_SERVICE_KEY", "DATABASE_URL"):
+        monkeypatch.delenv(k, raising=False)
+    s = Settings.from_env(env_file=tmp_path / "missing.env")
+    assert not s.has_db and s.db_backend is None and s.db_label == "none"
+    monkeypatch.setenv("DATABASE_URL", "postgres://scraper:s3cret@localhost:5433/flights")
+    s = Settings.from_env(env_file=tmp_path / "missing.env")
+    assert s.has_db and s.has_postgres and s.db_backend == "postgres"
+    assert s.db_label == "postgres://scraper@localhost:5433/flights"  # password never printed
+    assert "s3cret" not in s.db_label
+    # DATABASE_URL wins over Supabase credentials when both are set
+    monkeypatch.setenv("SUPABASE_URL", "https://abcd1234.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "sb_secret_x")
+    s = Settings.from_env(env_file=tmp_path / "missing.env")
+    assert s.db_backend == "postgres"
+    monkeypatch.delenv("DATABASE_URL")
+    s = Settings.from_env(env_file=tmp_path / "missing.env")
+    assert s.db_backend == "supabase" and s.db_label == "supabase:abcd1234"
